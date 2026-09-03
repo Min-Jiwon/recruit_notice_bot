@@ -35,6 +35,8 @@ STATE_PATH = ROOT / os.environ.get("STATE_FILE", "seen.json")
 
 ELLEAD_LIST = "https://www.ellead.com/board/recruitment"
 KDRI_LIST = "https://www.kdri.co.kr/bbs/board.php?bo_table=participation"
+AIOLOZ_LIST = "https://aioloz.co.kr/bizdemo146359/subject/sub1.php"
+AIOLOZ_BASE = "https://aioloz.co.kr"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -327,21 +329,82 @@ def enrich_kdri(post):
             post["pay"] = squash(money.group(1))
 
 
+# ---------------------------------------------- 아이올로지(KBI 한국의생명연구원)
+
+def fetch_aioloz():
+    page = fetch(AIOLOZ_LIST)
+
+    # 게시물은 com_board_idx=N 링크로 시작한다. 같은 idx 가 제목 링크와 이미지
+    # 링크로 두 번 나오므로 처음 등장 위치만 잡고, 다음 글까지를 한 덩어리로 본다.
+    marks = []
+    seen_here = set()
+    for m in re.finditer(r"com_board_idx=(\d+)", page):
+        idx = m.group(1)
+        if idx not in seen_here:
+            seen_here.add(idx)
+            marks.append((m.start(), idx))
+
+    if not marks:
+        raise RuntimeError("아이올로지: 목록에서 글을 찾지 못했습니다. " + preview(page))
+
+    posts = []
+    for i, (pos, idx) in enumerate(marks):
+        # 블록은 제목 링크 바로 앞(<a 시작)부터 다음 글까지로 잡아야, href 안의
+        # idx 숫자가 본문 텍스트로 새어 들어오지 않는다.
+        a_start = page.rfind("<a", 0, pos)
+        start = a_start if a_start != -1 and pos - a_start < 120 else pos
+        end = marks[i + 1][0] if i + 1 < len(marks) else pos + 1200
+        end = page.rfind("<a", 0, end) if i + 1 < len(marks) else end
+        block = page[start:end]
+
+        href = re.search(r'href=[\'"]([^\'"]*com_board_idx=' + idx + r'[^\'"]*)', block)
+        url = (AIOLOZ_BASE + href.group(1)) if href and href.group(1).startswith("/") \
+            else (href.group(1) if href else AIOLOZ_LIST)
+
+        # 제목은 그 idx 링크의 <a>...</a> 안쪽 텍스트다.
+        atext = re.search(r"com_board_idx=" + idx + r"[^>]*>(.*?)</a>", block, re.S)
+        title = re.sub(r"\s*\.\.\s*$", "", strip_tags(atext.group(1))) if atext else ""
+
+        text = strip_tags(re.sub(r"<img[^>]*>", " ", block))
+        target = re.search(r"시험\s*대상\s*:?\s*(.*?)(?:이미지|모집기간|$)", text)
+        scope = target.group(1) if target else text
+        # 목록 첫머리의 "마감" 표시는 거른다. "모집 마감 시" 는 진행중 표현이라 제외.
+        head = text[:150].replace("모집 마감 시", "")
+
+        posts.append({
+            "site": "아이올로지",
+            "id": idx,
+            "title": title or "(제목 없음)",
+            "url": url,
+            "status": "마감" if "마감" in head else "",
+            "age_text": scope,
+            "gender_text": scope,
+            "pay": "",
+        })
+    return posts
+
+
 # --------------------------------------------------------------- 조건 맞추기
 
-def match(post, people):
+def match(post, people, exclude=()):
     """조건에 맞는 사람 이름 목록과, 아무도 없을 때의 사유를 돌려준다.
 
     조건을 읽어내지 못한 항목은 놓치는 것보다 낫다고 보고 통과시킨다.
     """
-    if any(w in post["status"] for w in CLOSED_WORDS):
-        return [], f"상태: {post['status']}"
-
     gender = parse_gender(post["gender_text"])
     span = parse_age(post["age_text"])
     post["gender_norm"] = gender or "확인필요"
     post["age_norm"] = format_age(span)
     post["child_hint"] = looks_like_child_trial(post)
+
+    if any(w in post["status"] for w in CLOSED_WORDS):
+        return [], f"상태: {post['status']}"
+
+    # 원치 않는 기관·키워드가 제목이나 대상 설명에 있으면 통째로 뺀다.
+    haystack = squash(post["title"] + " " + post.get("age_text", ""))
+    for word in exclude:
+        if squash(word) in haystack:
+            return [], f"제외어: {word}"
 
     # 엘리드는 목록에 나이·성별을 항상 적어둔다. 둘 다 "시험마다 상이" 인 글은
     # 모집공고가 아니라 상단 고정 공지(필독 사항 등)라서 알리지 않는다.
@@ -489,16 +552,24 @@ def main():
     print("등록된 사람: " + ", ".join(
         f"{p['name']}({p['gender']}/{format_person_age(p['age'])})" for p in people))
 
+    # 제외할 기관·키워드. EXCLUDE 환경변수(쉼표 구분)가 config.json 보다 우선.
+    raw_ex = os.environ.get("EXCLUDE", "")
+    exclude = [w.strip() for w in raw_ex.split(",") if w.strip()] \
+        or [str(w).strip() for w in cfg.get("exclude", []) if str(w).strip()]
+    if exclude:
+        print("제외 키워드: " + ", ".join(exclude))
+
     state = load_json(STATE_PATH, {})
     # 아래 수집 과정에서 state 가 채워지므로, 시작 메시지 여부는 미리 정해둔다
-    was_empty = not any(state.get(k) for k in ("ellead", "kdri"))
+    was_empty = not any(state.get(k) for k in ("ellead", "kdri", "aioloz"))
 
-    wanted = [s.strip() for s in os.environ.get("SITES", "ellead,kdri").split(",")
-              if s.strip()]
+    wanted = [s.strip() for s in
+              os.environ.get("SITES", "ellead,kdri,aioloz").split(",") if s.strip()]
 
     found = {}
     errors = {}
-    for name, fetcher in (("ellead", fetch_ellead), ("kdri", fetch_kdri)):
+    for name, fetcher in (("ellead", fetch_ellead), ("kdri", fetch_kdri),
+                          ("aioloz", fetch_aioloz)):
         if name not in wanted:
             continue
         try:
@@ -539,7 +610,7 @@ def main():
             for post in fresh:
                 if name == "kdri":
                     enrich_kdri(post)
-                who, why = match(post, people)
+                who, why = match(post, people, exclude)
                 if who:
                     send(compose(post, who))
                     sent += 1
