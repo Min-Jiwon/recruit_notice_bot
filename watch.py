@@ -84,6 +84,14 @@ def strip_tags(fragment):
     return "\n".join(line.strip() for line in text.split("\n")).strip()
 
 
+def preview(page):
+    """사이트가 실제로 뭘 돌려줬는지 알 수 있게 앞부분만 요약한다."""
+    title = re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)
+    head = f"제목={strip_tags(title.group(1))[:60]} / " if title else ""
+    text = re.sub(r"\s+", " ", strip_tags(page))
+    return f"{head}길이={len(page)}자 / 내용앞부분: {text[:250]}"
+
+
 def squash(text):
     """공백을 전부 지운 비교용 문자열. 사이트마다 띄어쓰기가 제멋대로라서 필요하다."""
     return re.sub(r"\s+", "", text or "")
@@ -212,7 +220,7 @@ def fetch_ellead():
     page = fetch(ELLEAD_LIST)
     body = re.search(r"<tbody>(.*?)</tbody>", page, re.S)
     if not body:
-        raise RuntimeError("엘리드: 목록 표를 찾지 못했습니다 (사이트 구조 변경?)")
+        raise RuntimeError("엘리드: 목록 표를 찾지 못했습니다. " + preview(page))
 
     posts = []
     for row in re.findall(r"<tr[^>]*>.*?</tr>", body.group(1), re.S):
@@ -252,7 +260,7 @@ def fetch_kdri():
     page = fetch(KDRI_LIST)
     body = re.search(r"<tbody>(.*?)</tbody>", page, re.S)
     if not body:
-        raise RuntimeError("KDRI: 목록 표를 찾지 못했습니다 (사이트 구조 변경?)")
+        raise RuntimeError("KDRI: 목록 표를 찾지 못했습니다. " + preview(page))
 
     posts = []
     for row in re.findall(r"<tr[^>]*>.*?</tr>", body.group(1), re.S):
@@ -475,20 +483,35 @@ def main():
         f"{p['name']}({p['gender']}/{format_person_age(p['age'])})" for p in people))
 
     state = load_json(STATE_PATH, {})
-    first_run = not state.get("ellead") and not state.get("kdri")
+    # 아래 수집 과정에서 state 가 채워지므로, 시작 메시지 여부는 미리 정해둔다
+    was_empty = not any(state.get(k) for k in ("ellead", "kdri"))
 
     found = {}
-    errors = []
+    errors = {}
     for name, fetcher in (("ellead", fetch_ellead), ("kdri", fetch_kdri)):
         try:
             found[name] = fetcher()
             print(f"{name}: 목록 {len(found[name])}건")
         except Exception as exc:          # 한쪽이 죽어도 다른 쪽은 계속
-            errors.append(f"{name}: {exc}")
+            errors[name] = str(exc)
             print(f"! {name} 수집 실패: {exc}", file=sys.stderr)
 
+    # 사이트가 실패한 사실을 조용히 넘기면 반쪽만 감시하는 줄 모르게 된다.
+    # 다만 10분마다 같은 경고를 보내면 알림이 무의미해지므로 하루 한 번만 보낸다.
+    today = time.strftime("%Y-%m-%d")
+    notified = state.setdefault("error_notified", {})
+    for name, message in errors.items():
+        if notified.get(name) != today:
+            send(f"⚠️ <b>{name} 사이트를 읽지 못했습니다</b>\n\n"
+                 f"{html.escape(message[:600])}\n\n"
+                 "이 사이트의 공고는 당분간 알림이 가지 않습니다.")
+            notified[name] = today
+    for name in found:
+        notified.pop(name, None)          # 다시 되살아나면 경고 기록도 지운다
+
     if not found:
-        send("⚠️ 공고 알림 봇: 두 사이트 모두 읽지 못했습니다.\n" + "\n".join(errors))
+        STATE_PATH.write_text(
+            json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
         return 1
 
     sent = 0
@@ -496,7 +519,9 @@ def main():
         seen = set(state.get(name, []))
         fresh = [p for p in posts if p["id"] not in seen]
 
-        if first_run:
+        # 첫 실행 판단은 사이트별로 한다. 한쪽만 성공한 날이 있으면, 나중에 다른
+        # 쪽이 살아났을 때 기존 공고 수십 건이 한꺼번에 쏟아지기 때문이다.
+        if not seen:
             print(f"{name}: 첫 실행 — 기존 {len(fresh)}건은 알림 없이 기록만 합니다")
         else:
             for post in fresh:
@@ -518,7 +543,7 @@ def main():
     STATE_PATH.write_text(
         json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
 
-    if first_run:
+    if was_empty:
         send("✅ 공고 알림 봇을 시작했습니다.\n\n등록된 사람:\n"
              + "\n".join(f"· {p['name']} — {p['gender']} / "
                          f"{format_person_age(p['age'])}" for p in people)
