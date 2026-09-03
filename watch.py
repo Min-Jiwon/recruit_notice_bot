@@ -23,8 +23,15 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "config.json"
-STATE_PATH = ROOT / "seen.json"
+
+# 배치 파일에 한글을 적으면 콘솔 코드페이지에 따라 깨진다. 그래서 사람 정보는
+# UTF-8 로 읽는 이 파일에 두고, 배치에서는 파일 이름만 지정한다.
+CONFIG_PATH = ROOT / os.environ.get("CONFIG_FILE", "config.json")
+
+# KDRI 는 해외·데이터센터 IP 에 봇 검사 페이지를 내보내서 GitHub 에서는 읽히지
+# 않는다. 그래서 사이트를 나눠 돌릴 수 있게 해 뒀다 (GitHub=엘리드, 내 PC=KDRI).
+# 나눠 돌릴 때는 기록 파일도 따로 써야 서로 덮어쓰지 않는다.
+STATE_PATH = ROOT / os.environ.get("STATE_FILE", "seen.json")
 
 ELLEAD_LIST = "https://www.ellead.com/board/recruitment"
 KDRI_LIST = "https://www.kdri.co.kr/bbs/board.php?bo_table=participation"
@@ -486,9 +493,14 @@ def main():
     # 아래 수집 과정에서 state 가 채워지므로, 시작 메시지 여부는 미리 정해둔다
     was_empty = not any(state.get(k) for k in ("ellead", "kdri"))
 
+    wanted = [s.strip() for s in os.environ.get("SITES", "ellead,kdri").split(",")
+              if s.strip()]
+
     found = {}
     errors = {}
     for name, fetcher in (("ellead", fetch_ellead), ("kdri", fetch_kdri)):
+        if name not in wanted:
+            continue
         try:
             found[name] = fetcher()
             print(f"{name}: 목록 {len(found[name])}건")
