@@ -33,6 +33,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -f seen.json ] || { echo "기록 파일이 없어 저장 생략"; exit 0; }
+          cp seen.json /tmp/seen.json
+          git fetch origin main
+          git reset --hard origin/main
+          cp /tmp/seen.json seen.json
           git add seen.json
-          git diff --staged --quiet || git commit -m "chore: 확인한 공고 기록 갱신"
-          git push
+          if git diff --staged --quiet; then
+            echo "바뀐 내용 없음 — 저장 생략"
+          else
+            git commit -m "chore: 확인한 공고 기록 갱신"
+            git push origin HEAD:main
+          fi
