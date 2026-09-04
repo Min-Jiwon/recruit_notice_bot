@@ -37,6 +37,8 @@ ELLEAD_LIST = "https://www.ellead.com/board/recruitment"
 KDRI_LIST = "https://www.kdri.co.kr/bbs/board.php?bo_table=participation"
 AIOLOZ_LIST = "https://aioloz.co.kr/bizdemo146359/subject/sub1.php"
 AIOLOZ_BASE = "https://aioloz.co.kr"
+THEKRC_LIST = "https://thekrc.kr/participation/recruitment_subjects"
+THEKRC_DETAIL = "https://thekrc.kr/participation/subject_detail?number="
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -384,6 +386,56 @@ def fetch_aioloz():
     return posts
 
 
+# ------------------------------------------------------ 더케이피부과학연구소(KRC)
+
+def fetch_thekrc():
+    page = fetch(THEKRC_LIST)
+    rows = re.findall(
+        r"""<tr onclick="location\.href='([^']+)';">(.*?)</tr>""", page, re.S)
+    if not rows:
+        raise RuntimeError("더케이: 목록을 찾지 못했습니다. " + preview(page))
+
+    posts = []
+    for href, body in rows:
+        num = re.search(r"number=(\d+)", href)
+        if not num:
+            continue
+        tds = re.findall(r"<td[^>]*>(.*?)</td>", body, re.S)
+        title = strip_tags(tds[0]) if tds else ""
+        status = strip_tags(tds[-1]) if len(tds) > 1 else ""
+        if not title:
+            continue
+        posts.append({
+            "site": "더케이",
+            "id": num.group(1),
+            "title": title,
+            "url": f"{THEKRC_DETAIL}{num.group(1)}",
+            "status": status,
+            "age_text": "",
+            "gender_text": "",
+            "pay": "",
+        })
+    return posts
+
+
+def enrich_thekrc(post):
+    """더케이는 목록에 조건이 없어서 상세페이지에서 연령·성별을 읽어온다."""
+    try:
+        page = fetch(post["url"])
+    except RuntimeError as exc:
+        post["detail_failed"] = True
+        print(f"  ! 상세 조회 실패({post['id']}): {exc}", file=sys.stderr)
+        return
+
+    # 표 셀 사이가 개행으로 갈라져 "연령\n\n\n만 19~64세" 처럼 나온다. 공백을
+    # 한 칸으로 눌러서 "연령 만 19~64세 ... 성별 남녀무관" 형태로 만든 뒤 읽는다.
+    text = re.sub(r"\s+", " ", strip_tags(page))
+    age_m = re.search(r"연령\s*(.{0,40})", text)
+    gen_m = re.search(r"성별\s*(.{0,25})", text)
+    post["age_text"] = age_m.group(1) if age_m else text
+    post["gender_text"] = gen_m.group(1) if gen_m else (age_m.group(1) if age_m else text)
+
+
 # --------------------------------------------------------------- 조건 맞추기
 
 def match(post, people, exclude=()):
@@ -561,15 +613,17 @@ def main():
 
     state = load_json(STATE_PATH, {})
     # 아래 수집 과정에서 state 가 채워지므로, 시작 메시지 여부는 미리 정해둔다
-    was_empty = not any(state.get(k) for k in ("ellead", "kdri", "aioloz"))
+    was_empty = not any(state.get(k)
+                        for k in ("ellead", "kdri", "aioloz", "thekrc"))
 
     wanted = [s.strip() for s in
-              os.environ.get("SITES", "ellead,kdri,aioloz").split(",") if s.strip()]
+              os.environ.get("SITES", "ellead,kdri,aioloz,thekrc").split(",")
+              if s.strip()]
 
     found = {}
     errors = {}
     for name, fetcher in (("ellead", fetch_ellead), ("kdri", fetch_kdri),
-                          ("aioloz", fetch_aioloz)):
+                          ("aioloz", fetch_aioloz), ("thekrc", fetch_thekrc)):
         if name not in wanted:
             continue
         try:
@@ -610,6 +664,8 @@ def main():
             for post in fresh:
                 if name == "kdri":
                     enrich_kdri(post)
+                elif name == "thekrc":
+                    enrich_thekrc(post)
                 who, why = match(post, people, exclude)
                 if who:
                     send(compose(post, who))
