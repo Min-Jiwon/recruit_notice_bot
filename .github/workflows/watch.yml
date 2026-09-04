@@ -31,7 +31,7 @@ jobs:
           EXCLUDE: ${{ secrets.EXCLUDE }}
           # KDRI 는 여기서 봇 검사에 막힌다. GitHub 은 엘리드·아이올로지를 맡고
           # KDRI 는 집 PC 에서 확인한다.
-          SITES: ellead,aioloz
+          SITES: ellead,aioloz,thekrc
         run: python watch.py
 
       - name: 확인한 공고 기록 저장
